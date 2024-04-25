@@ -1,0 +1,36 @@
+task: semantic
+nc: 2
+skip_make_divisible: True
+
+backbone:
+  - [-1, 1, tf_mobilenetv3_large_075, ["tf_mobilenetv3_large_075-150ee8b0", [1, 2, 3, 5, 6]]]
+  # c2, k=1, s=1, p=None, use_bn=True, act=nn.SiLU, g=1, d=1
+  - [-1, 1, Conv, [48, 3, 2, None, False]] # 5
+  - [-1, 1, Conv, [42, 3, 2, None, False]] # 6
+  - [-1, 1, Conv, [42, 3, 1, None, False]] # 7
+
+head:
+  - [1, 1, Conv, [42, 3, 1, None, False]] # 8
+  - [2, 1, Conv, [42, 3, 1, None, False]] # 9
+  - [3, 1, Conv, [42, 3, 1, None, False]] # 10
+  - [4, 1, Conv, [42, 3, 1, None, False]] # 12
+
+  - [7, 1, nn.Upsample, [None, 4]] # 13
+  - [[-1, 12], 1, SkipConn, []] # 14
+
+  - [-1, 1, nn.Upsample, [None, 2]] # 15
+  - [[-1, 10], 1, SkipConn, []] # 16
+
+  - [-1, 1, nn.Upsample, [None, 2]] # 17
+  - [[-1, 9], 1, SkipConn, []] # 18
+
+  - [-1, 1, nn.Upsample, [None, 2]] # 17
+  - [[-1, 8], 1, SkipConn, []] # 18
+
+  - [15, 1, Conv, [42, 3, 1]] # 19
+  - [-1, 1, nn.Upsample, [None, 4]] # 20
+  - [[-1, 18], 1, SkipConn, []] # 21
+  - [-1, 1, Conv, [42, 3, 1]]
+  - [-1, 1, Conv, [64, 3, 1]]
+
+  - [-1, 1, Semantic, [nc, 3, 4]]
