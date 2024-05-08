@@ -1,4 +1,5 @@
 import torch
+import numpy as np
 
 
 class ConfusionMetrix:
@@ -106,3 +107,27 @@ class ClassifyMetrics(Metrics):
     @property
     def fitness(self):
         return self.top1
+
+
+def bbox_ioa(box1, box2, iou=False, eps=1e-7):
+    # Get the coordinates of bounding boxes
+    b1_x1, b1_y1, b1_x2, b1_y2 = box1.T
+    b2_x1, b2_y1, b2_x2, b2_y2 = box2.T
+
+    # Intersection area
+    inter_area = (
+        np.minimum(b1_x2[:, None], b2_x2) - np.maximum(b1_x1[:, None], b2_x1)
+    ).clip(0) * (
+        np.minimum(b1_y2[:, None], b2_y2) - np.maximum(b1_y1[:, None], b2_y1)
+    ).clip(
+        0
+    )
+
+    # Box2 area
+    area = (b2_x2 - b2_x1) * (b2_y2 - b2_y1)
+    if iou:
+        box1_area = (b1_x2 - b1_x1) * (b1_y2 - b1_y1)
+        area = area + box1_area[:, None] - inter_area
+
+    # Intersection over box2 area
+    return inter_area / (area + eps)

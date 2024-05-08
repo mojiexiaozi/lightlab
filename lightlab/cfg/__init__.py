@@ -19,6 +19,8 @@ class AugmentParameters:
     copy_paste: float = 0.0
     auto_augment: str = None  # (randaugment, autoaugment, augmix)
     erasing: float = 0.4
+    overlap_mask: bool = True
+    mask_ratio: int = 4
 
 
 @dataclass

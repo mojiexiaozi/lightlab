@@ -3,6 +3,10 @@ from pathlib import Path
 from multiprocessing.pool import ThreadPool
 from itertools import repeat
 import numpy as np
+import torch
+import cv2
+from copy import deepcopy
+import math
 
 from lightlab.cfg import AugmentParameters
 from lightlab.utils import NUM_THREADS, TQDM, LOGGER, LOCAL_RANK
@@ -13,6 +17,9 @@ from lightlab.data.utils import (
     get_hash,
     verify_image_label,
 )
+from lightlab.utils.ops import resample_segments
+from lightlab.utils.instance import Instances
+from lightlab.data.augment import v8_transforms, Compose, LetterBox, Format
 
 
 class YOLODataset(Dataset):
@@ -30,6 +37,7 @@ class YOLODataset(Dataset):
         single_cls=False,
         pad=0.5,
         kpt_shape=None,
+        flip_idx=[],
         params=AugmentParameters(),
     ) -> None:
         super().__init__()
@@ -41,6 +49,7 @@ class YOLODataset(Dataset):
         self.batch_size = batch_size
         self.stride = stride
         self.kpt_shape = kpt_shape
+        self.flip_idx = flip_idx
         self.pad = pad
         self.cfg = params
         self.nc = nc
@@ -70,6 +79,67 @@ class YOLODataset(Dataset):
             [None] * self.ni,
             [None] * self.ni,
         )
+        self.transforms = self.build_transforms(params)
+
+    def load_image(self, i, rect_mode=True):
+        im, f = self.ims[i], self.im_files[i]
+        if im is None:
+            im = cv2.imread(f)
+            if im is None:
+                raise FileNotFoundError(f"Image Not Found {f}")
+            h0, w0 = im.shape[:2]  # origin hw
+            # resize long side to imgsz while maintaining aspect ratio
+            if rect_mode:
+                r = self.imgsz / max(h0, w0)
+                if r != 1:
+                    w, h = min(math.ceil(w0 * r), self.imgsz), min(
+                        math.ceil(h0 * r), self.imgsz
+                    )
+                    print(im.shape, h, w)
+                    im = cv2.resize(im, (w, h), interpolation=cv2.INTER_LINEAR)
+            elif not (h0 == w0 == self.imgsz):
+                im = cv2.resize(
+                    im, (self.imgsz, self.imgsz), interpolation=cv2.INTER_LINEAR
+                )
+            # Add to buffer if training with augmentations
+            if self.augment:
+                self.ims[i], self.im_hw0[i], self.im_hw[i] = im, (h0, w0), im.shape[:2]
+                self.buffer.append(i)
+                if len(self.buffer) >= self.max_buffer_length:
+                    j = self.buffer.pop()
+                    self.ims[j], self.im_hw0[j], self.im_hw[j] = None, None, None
+            return im, (h0, w0), im.shape[:2]
+        return self.ims[i], self.im_hw0[i], self.im_hw[i]
+
+    def close_mosaic(self, params: AugmentParameters):
+        params.mosaica = 0.0
+        params.copy_paste = 0.0
+        params.mixup = 0.0
+        self.transforms = self.build_transforms(params)
+
+    def build_transforms(self, params: AugmentParameters):
+        if self.augment:
+            params.mosaic = 0.0 if self.rect else params.mosaic
+            params.mixup = 0.0 if self.rect else params.mixup
+            transforms = v8_transforms(self, self.imgsz, params)
+        else:
+            transforms = Compose(
+                [LetterBox(new_shape=(self.imgsz, self.imgsz), scaleup=False)]
+            )
+        transforms.append(
+            Format(
+                bbox_format="xywh",
+                normalize=True,
+                return_mask=self.use_segments,
+                return_keypoint=self.use_keypoints,
+                return_obb=self.use_obb,
+                batch_idx=True,
+                mask_ratio=params.mask_ratio,
+                mask_overlap=params.overlap_mask,
+                bgr=params.bgr if self.augment else 0.0,  # only affect training.
+            )
+        )
+        return transforms
 
     def set_rectangle(self):
         bi = np.floor(np.arange(self.ni) / self.batch_size).astype(int)
@@ -239,6 +309,64 @@ class YOLODataset(Dataset):
     def __getitem__(self, index):
         return self.transforms(self.get_image_and_label(index))
 
+    def get_image_and_label(self, index):
+        label = deepcopy(self.labels[index])
+        label.pop("shape", None)
+        label["img"], label["ori_shape"], label["resized_shape"] = self.load_image(
+            index
+        )
+        label["ratio_pad"] = (
+            label["resized_shape"][0] / label["ori_shape"][0],
+            label["resized_shape"][1] / label["ori_shape"][1],
+        )
+        if self.rect:
+            label["rect_shape"] = self.batch_shapes[self.batch[index]]
+        return self.update_labels_info(label)
+
+    def update_labels_info(self, label):
+        bboxes = label.pop("bboxes")
+        segments = label.pop("segments", [])
+        keypoints = label.pop("keypoints", None)
+        bbox_format = label.pop("bbox_format")
+        normalized = label.pop("normalized")
+        segment_resamples = 100 if self.use_obb else 1000
+        if len(segments) > 0:
+            segments = np.stack(
+                resample_segments(segments, n=segment_resamples), axis=0
+            )
+        else:
+            segments = np.zeros((0, segment_resamples, 2), dtype=np.float32)
+        label["instances"] = Instances(
+            bboxes, segments, keypoints, bbox_format=bbox_format, normalized=normalized
+        )
+        return label
+
+    @staticmethod
+    def collate_fn(batch):
+        new_batch = {}
+        keys = batch[0].keys()
+        values = list(zip(*[list(b.values()) for b in batch]))
+        for i, k in enumerate(keys):
+            val = values[i]
+            if k == "img":
+                val = torch.stack(val, 0)
+            elif k in {"masks", "keypoints", "bboxes", "cls", "segments", "obb"}:
+                val = torch.cat(val, 0)
+            new_batch[k] = val
+        new_batch["batch_idx"] = list(new_batch["batch_idx"])
+        for i in range(len(new_batch["batch_idx"])):
+            new_batch["batch_idx"][i] += i
+        new_batch["batch_idx"] = torch.cat(new_batch["batch_idx"], 0)
+        return new_batch
+
 
 if __name__ == "__main__":
     dataset = YOLODataset("assets/datasets/coco128/train")
+    data = dataset[0]
+    img = data["img"]
+    img = img.permute(1, 2, 0).numpy()
+    print(img.shape)
+    from PIL import Image
+
+    im = Image.fromarray(img)
+    im.save("test.png")

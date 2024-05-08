@@ -56,6 +56,7 @@ class ClassifyTrainer(Trainer):
 if __name__ == "__main__":
     cfg = HyperParameters()
     cfg.model = "yolov8-cls"
+    cfg.device = "cpu"
     cfg.pretrain = True
     cfg.imgsz = 224
     cfg.data = "assets/datasets/pole-cls"
