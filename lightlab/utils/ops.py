@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Union
 import torch
 import numpy as np
 import cv2
@@ -32,7 +32,7 @@ def ltwh2xyxy(x):
     return y
 
 
-def xyxy2xywh(boxes: np.ndarray | torch.Tensor) -> np.ndarray:
+def xyxy2xywh(boxes: Union[np.ndarray, torch.Tensor]) -> np.ndarray:
     assert boxes.shape[-1] == 4
     y = (
         torch.empty_like(boxes)
